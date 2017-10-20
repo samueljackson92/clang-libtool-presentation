@@ -1,0 +1,85 @@
+#!/usr/bin/env python
+import requests
+import sys
+import subprocess
+import os
+import re
+import tempfile
+
+def get_build_list():
+    contents = get_json_data("http://builds.mantidproject.org/job/pull_requests-clang-format/api/json?pretty=true")
+    if 'builds' in contents.keys():
+        return [build['url'] for build in contents['builds']]
+    else:
+        print "Could not retrieve build list from server"
+        sys.exit(-1)
+
+def get_json_data(url):
+    r = requests.get(url)
+    if r.status_code == 200:
+        return r.json()
+    else:
+        print "Could not retrieve JSON from server"
+        sys.exit(-1)
+
+def run_command(command):
+    try:
+        return subprocess.check_output(command.split(' ')).strip()
+    except Exception:
+        sys.exit(-1)
+
+def get_last_commit():
+    return run_command('git rev-list -1 --no-merges --abbrev-commit HEAD')
+
+def get_branch_name():
+    return run_command('git rev-parse --abbrev-ref HEAD')
+
+def git_apply_patch(patch):
+    try:
+        return subprocess.check_output(['git', 'apply', patch]).strip()
+    except Exception:
+        sys.exit(-1)
+
+def git_commit(message):
+    try:
+        return subprocess.check_output(['git', 'commit', '-m', message]).strip()
+    except Exception:
+        sys.exit(-1)
+
+def find_correct_build():
+    last_commit = get_last_commit()
+    print "Last commit was: " + last_commit
+    print "Searching for build..."
+
+    found = False
+    build_urls = get_build_list()
+    for url in build_urls:
+        data = get_json_data(url + '/api/json')
+        print url + '/api/json'
+        if data['result'] == 'FAILURE':
+            sha = data["actions"][0]["parameters"][2]["value"]
+            patch_name = data['artifacts'][0]['relativePath']
+
+            if last_commit in sha:
+                found = True
+                break
+   
+    if not found:
+        print "Could not find failed build with patch to apply."
+        sys.exit(-1)
+
+    r = requests.get(data['url'] + '/artifact/' + patch_name)
+    if r.status_code == 200:
+        print "Applying path " + patch_name
+        with tempfile.NamedTemporaryFile() as temp:
+            temp.write(r.text)
+            temp.flush()
+            
+            git_apply_patch(temp.name)
+            run_command('git add .')
+            issue_number = re.findall("\d+", get_branch_name())[0]
+            message = "Refs #%s Apply clang-format patch" % issue_number
+            git_commit(message)
+
+if __name__ == "__main__":
+    find_correct_build()
